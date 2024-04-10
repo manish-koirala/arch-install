@@ -1,0 +1,219 @@
+#!/bin/bash
+# A simple bash script to quick install my custom implementation of Arch Linux with DWM, SucklessUtils and other minimal programs.
+
+#PART1
+#Format titles of some sections.
+function title {
+	echo -e "\n\n\n#########################################################\n   ${1}   \n#########################################################\n"
+}
+# Set the console keyboard font 
+title "Setting Console Keyboard Font..."
+setfont ter-u24b
+echo "Console keyboard font has been set to ter-u24b..."
+sleep 1
+# Verify the boot mode is UEFI.
+title "Checking System Boot Mode..."
+ls /sys/firmware/efi/efivars &> /dev/null && echo "UEFI mode detected."
+[ $? -ne 0 ] && echo -e "System is not booted in UEFI mode.. \nPlease make sure that your system is booted in UEFI mode." && exit 1
+sleep 1
+# Check the systemclock (systemctl)
+title "System Clock Status..."
+timedatectl set-ntp true
+timedatectl status
+sleep 1
+# Partition the disks. (cfdisk)
+title "Partitioning Disk Drive..."
+disk_drive=`lsblk | grep -e '.da' | head -n 1 | cut -f1 -d' '`
+lsblk
+printf "Detected disk is /dev/%s. Is it correct ?(y/n): " $disk_drive
+read choice
+if [[ ${choice,,} == 'y' ]] ; then
+	echo "Selected disk drive: $disk_drive"
+	sleep 2
+	cfdisk /dev/$disk_drive
+else
+	read -p "Enter the disk name(eg. sda, vda, sdb, etc.): " disk_drive
+	echo "Selected disk drive: ${disk_drive}"
+	sleep 2
+	cfdisk /dev/$disk_drive
+fi
+# Format the partitions. (root as ext4 and efi partition as fat32)
+title "Formatting Disk Partitions..."
+efi_part='/dev/sda1'
+root_part='/dev/sda2'
+read -p "Selected efi partition: ${efi_part} and root partition: ${root_part}. Is that correct (Y/n)? :" part_choice
+[[ ${part_choice,,} == "n" ]] && read -p "Enter efi partition(/dev/xda1): " efi_part && read -p "Enter root partition(/dev/xda2): " root_part
+mkfs.ext4 ${root_part}
+echo "${root_part} has been formatted with ext4..."
+mkfs.fat -F 32 ${efi_part}
+echo "${efi_part} has been formatted with FAT32..."
+sleep 1
+# Mount the file systems.
+title "Mounting The System Partitions..."
+mount ${root_part} /mnt
+mount --mkdir ${efi_part} /mnt/boot/EFI
+echo "Root partition mounted at /mnt"
+echo "EFI partition mounted at /mnt/boot/EFI"
+sleep 1
+# Install essential packages via pacstrap.
+pacman -S --noconfirm --needed reflector
+reflector
+title "Installing Essential Packages..."
+pacstrap -K /mnt base base-devel linux linux-headers linux-firmware sof-firmware networkmanager intel-ucode vim
+## Configure the system
+# Generate the fstab (file system table) file.
+title "Generating the file system table (/etc/fstab file)..."
+echo "Generating file system table (fstab) file:"
+genfstab -U /mnt > /mnt/etc/fstab
+echo "fstab file has been created..."
+# Create a part 2 bash shell file into the main root directory.
+echo "Copying installer2 into the root folder..."
+sed '1,/^#PART2$/d' `basename $0` > /mnt/installer2.sh
+chmod 777 /mnt/installer2.sh
+sleep 1
+# Change root into the new system (arch-chroot).
+arch-chroot /mnt ./installer2.sh
+umount -R /mnt && reboot
+[ $? -ne 0 ] && umount -l /mnt && reboot
+exit
+#PART2
+# Title formater
+function title {
+	echo -e "\n\n\n#########################################################\n   ${1}   \n#########################################################\n"
+}
+# Install sed
+pacman -S --noconfirm sed
+# Set the time zone.
+title "Setting the time zone..."
+ln -sf /usr/share/zoneinfo/Asia/Kathmandu /etc/localtime
+echo "Time zone has been set to /Asia/Kathmandu."
+hwclock --systohc
+sleep 2
+# Configure the swap file.
+title "Configuring swap file..."
+## Delete the swap file if it exists
+if [ -e /swapfile ] ; then
+	swapoff /swapfile
+	rm -rf /swapfile
+	sed -i '11,12d' /etc/fstab
+fi
+read -p "Enter the size of the swap file(in G.B.): " swap_size
+dd if=/dev/zero of=/swapfile bs=1G count=$swap_size status=progress
+chmod 0600 /swapfile
+mkswap -U clear /swapfile
+swapon /swapfile
+echo "#swapfile" >> /etc/fstab
+echo -e "/swapfile\tnone\tswap\tdefaults\t0\t0" >> /etc/fstab
+# Set the system localization.
+title "Generating system locales...."
+sed -i 's/#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && locale-gen && echo "LANG=en_US.UTF-8" > /etc/locale.conf
+# Configure hostname and hosts on the network. (/etc/hostname and /etc/hosts).
+title "Configuring hostname on the device..."
+read -p "Enter your device hostname: " hostname
+echo $hostname > /etc/hostname
+printf "172.0.0.1\t%s\n" "localhost" > /etc/hosts
+printf "::1\t\t%s\n" "localhost" >> /etc/hosts
+printf "127.0.1.1\t%s\t%s\n" "${hostname}.localdomain" "${hostname}" >> /etc/hosts
+# Configure root password
+title "Configure root password"
+passwd
+# Add a user to the system and add the user to the wheel group. (useradd -mG wheel USER_NAME)
+title "Adding a user..."
+read -p "Enter username for the new user: " username
+useradd -mG wheel,audio,video,storage,optical $username
+# Set the password for the new user.
+title "Set user password..."
+passwd $username
+# Configure sudo (visudo)
+sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+# Install and configure bootloader (Grub) and other tools.
+title "Installing bootloader..."
+pacman -S --noconfirm grub efibootmgr dosfstools os-prober ntfs-3g
+grub-install --target=x86_64-efi --efi-directory=/boot/EFI --bootloader-id=GRUB --recheck
+grub-mkconfig -o /boot/grub/grub.cfg
+## Install all essential programs.
+title "Installing Packages"
+## Enable multilib in pacman
+echo '[multilib]' >> /etc/pacman.conf
+echo 'Include = /etc/pacman.d/mirrorlist' >> /etc/pacman.conf
+pacman -Syu
+pacman -S --needed --noconfirm pulseaudio pulseaudio-alsa alsa-utils pamixer firefox neofetch \
+	cmatrix feh git wget curl xorg-server xorg-xinit xorg-xev xorg-xprop xorg-xsetroot xorg-xkill xclip xorg-xrdb \
+	libx11 libxft libxinerama fontconfig picom net-tools terminus-font mpc mpd ncmpcpp mpv ttf-fira-code \
+	ttf-font-awesome zathura zathura-pdf-mupdf emacs sxhkd qt5ct lxappearance bat lf man-db brightnessctl \
+	p7zip unzip zip ntfs-3g bluez bluez-utils rsync tlp fzf guvcview redshift xf86-video-intel vulkan-intel python-pip
+## Enable some essential services in the next reboot.
+title "Enabling services..."
+systemctl enable NetworkManager.service
+systemctl enable tlp
+echo "Network Manger Service has been enabled."
+echo "Tlp service has been enabled."
+sleep 1
+## Set the terminal font to terminus permanently.
+title "Setting Console Font To Terminus..."
+echo "FONT=ter-u24b" > /etc/vconsole.conf
+echo "Console font has been set to ter-u24b"
+## Make ready for part 3
+ins3_path=/home/${username}/installer3.sh
+sed '1,/^#PART3$/d' `basename $0` > $ins3_path
+chown ${username}:${username} $ins3_path
+chmod 777 $ins3_path
+## Configure qt5ct.
+title "Configuring A Few More Things..."
+echo 'QT_QPA_PLATFORMTHEME=qt5ct' > /etc/environment
+## Configure libinput.
+### This is for enabling natural scrolling, and tapping with touchpad.
+[ -e /etc/X11/xorg.conf.d ] || mkdir -p /etc/X11/xorg.conf.d
+printf "%s\n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n%s\n" 'Section "InputClass"' 'Identifier "touchpad"' 'Driver "libinput"' 'MatchIsTouchpad "on"' 'Option "Tapping" "on"' 'Option "TappingButtonMap" "lmr"' 'Option "NaturalScrolling" "true"' 'EndSection' > /etc/X11/xorg.conf.d/30-touchpad.conf
+exit
+
+#PART3
+cd $HOME
+# Title formater
+function title {
+	echo -e "\n\n\n#########################################################\n   ${1}   \n#########################################################\n"
+}
+title "Connecting to the internet..."
+read -p "Enter wifi_ssid: " wifi_ssid
+read -p "Enter wifi_password: " wifi_pass
+sudo nmcli device wifi connect "$wifi_ssid" password "$wifi_pass" 
+## Pull dotfiles from github and then set up alias for managing dotfiles.
+title "Setting up dotfiles..."
+/bin/git clone --bare https://www.github.com/brain-d8d/.dotfiles $HOME/.dotfiles
+/bin/git --git-dir=$HOME/.dotfiles/	 --work-tree=$HOME config --local status.showUntrackedFiles no
+[ -e $HOME/.bashrc ] && rm $HOME/.bashrc
+[ -e $HOME/.bash_profile ] && rm $HOME/.bash_profile
+/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME checkout
+## Pull dm-scripts.
+mkdir -p ~/local/bin
+curl https://raw.githubusercontent.com/brain-d8d/dm-brain/main/dm-brain -o ~/.local/bin/dm-brain
+chmod 700 ~/.local/bin/dm-brain
+## Make and install programs from source.
+title "Installing sucklessUtils from source"
+sudo make -C $HOME/.config/sucklessUtils/dwm clean install
+sudo make -C $HOME/.config/sucklessUtils/dmenu clean install
+sudo make -C $HOME/.config/sucklessUtils/st clean install
+sudo make -C $HOME/.config/sucklessUtils/slstatus clean install
+## Install the AUR helper
+title "Installing AUR helper (yay)"
+git clone https://aur.archlinux.org/yay ~/Downloads/yay
+cd ./Downloads/yay
+makepkg -sri
+## Install bibata-cursor-themes and gruvbox theme AUR.
+title "Installing themes. (bibata-cursor-theme, gruvbox-dark-gtk)"
+yay -S bibata-cursor-theme gruvbox-dark-gtk
+## Install black-arch linux
+title "Installing black arch"
+curl -O https://blackarch.org/strap.sh
+echo 5ea40d49ecd14c2e024deecf90605426db97ea0c strap.sh | sha1sum -c
+[ $? -eq 0 ] && sleep 2 && chmod +x strap.sh && sudo -S ./strap.sh
+## Update packages
+sudo -S pacman -Syu
+## Install some tools from black arch repos.
+title "Installing Tools From BlackArch Repo"
+sudo -S pacman -S --needed --noconfirm hashcat aircrack-ng john wordlistctl wireshark-qt
+## Configure emacs
+systemctl enable --user emacs
+systemctl start --user emacs
+## Cleanup
+sudo rm /installer2.sh
